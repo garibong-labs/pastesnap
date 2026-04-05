@@ -1,23 +1,76 @@
 import AppKit
 import Foundation
 
-/// Controls the NSStatusItem and its associated menu.
-@MainActor
-final class MenuBarController: NSObject {
-    private static weak var sharedInstance: MenuBarController?
+// MARK: - Action Handler (plain NSObject, no actor isolation)
+@objc class MenuActionHandler: NSObject {
+    private var onThemeChange: ((String) -> Void)?
+    private var onHistory: (() -> Void)?
+    private var onQuit: (() -> Void)?
 
+    func bind(
+        onThemeChange: @escaping (String) -> Void,
+        onHistory: @escaping () -> Void,
+        onQuit: @escaping () -> Void
+    ) {
+        self.onThemeChange = onThemeChange
+        self.onHistory = onHistory
+        self.onQuit = onQuit
+    }
+
+    @objc func selectTheme(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        onThemeChange?(id)
+    }
+
+    @objc func showHistory() {
+        onHistory?()
+    }
+
+    @objc func quitApp() {
+        onQuit?()
+    }
+}
+
+// MARK: - Menu Bar Controller
+@MainActor
+final class MenuBarController {
     private let statusItem: NSStatusItem
     private let appState: AppState
+    private let handler = MenuActionHandler()
 
     init(appState: AppState) {
         self.appState = appState
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        super.init()
+
+        handler.bind(
+            onThemeChange: { [weak self] id in
+                self?.setTheme(id)
+            },
+            onHistory: { [weak self] in
+                self?.appState.showHistory()
+            },
+            onQuit: { [weak self] in
+                self?.appState.cleanupAndQuit()
+            }
+        )
 
         setupMenuBarIcon()
         setupMenu()
 
-        Self.sharedInstance = self
+        NSLog("[PasteSnap] MenuBarController initialized, menu set")
+    }
+
+    private func setTheme(_ id: String) {
+        appState.setTheme(id)
+        updateThemeCheckmarks()
+    }
+
+    private func updateThemeCheckmarks() {
+        guard let menu = statusItem.menu else { return }
+        for item in menu.items {
+            guard let tid = item.representedObject as? String else { continue }
+            item.state = appState.theme == tid ? .on : .off
+        }
     }
 
     private func setupMenuBarIcon() {
@@ -28,90 +81,45 @@ final class MenuBarController: NSObject {
     }
 
     private func setupMenu() {
-        let menu = NSMenu()
+        let menu = NSMenu(title: "PasteSnap")
+        menu.autoenablesItems = false
 
         // Status label
         let statusItem = NSMenuItem(title: "Monitoring", action: nil, keyEquivalent: "")
         statusItem.isEnabled = false
         menu.addItem(statusItem)
 
-        // Separator
         menu.addItem(NSMenuItem.separator())
 
         // Theme items
-        for theme in CardTheme.allThemes {
-            let item = NSMenuItem(
-                title: themeMenuItemTitle(theme),
-                action: #selector(selectTheme(_:)),
-                keyEquivalent: ""
-            )
-            item.representedObject = theme.identifier
-            item.state = appState.theme == theme.identifier ? .on : .off
-            item.target = self
+        let themes = [
+            ("dark-code", "🌑 Theme: Dark Code"),
+            ("light-quote", "☀️ Theme: Light Quote"),
+            ("minimal-gray", "⬜ Theme: Minimal Gray"),
+        ]
+        for (id, title) in themes {
+            let item = NSMenuItem(title: title, action: #selector(MenuActionHandler.selectTheme(_:)), keyEquivalent: "")
+            item.representedObject = id
+            item.target = handler
+            item.state = appState.theme == id ? .on : .off
             menu.addItem(item)
         }
 
         menu.addItem(NSMenuItem.separator())
 
         // History
-        let histItem = NSMenuItem(title: "📋 History", action: #selector(showHistory), keyEquivalent: "")
-        histItem.target = self
+        let histItem = NSMenuItem(title: "📋 History", action: #selector(MenuActionHandler.showHistory), keyEquivalent: "")
+        histItem.target = handler
         menu.addItem(histItem)
 
-        // Separator
         menu.addItem(NSMenuItem.separator())
 
         // Quit
-        let quitItem = NSMenuItem(title: "❌ Quit", action: #selector(quitApp), keyEquivalent: "q")
-        quitItem.target = self
+        let quitItem = NSMenuItem(title: "Quit", action: #selector(MenuActionHandler.quitApp), keyEquivalent: "q")
+        quitItem.target = handler
         menu.addItem(quitItem)
 
         statusItem.menu = menu
-    }
-
-    // MARK: Static (called from AppState)
-
-    /// Update theme checkmarks in the menu bar menu after theme switch.
-    static func updateThemeCheckmarks() {
-        guard let me = Self.sharedInstance else { return }
-        guard let menu = me.statusItem.menu else { return }
-        for item in menu.items {
-            guard let themeId = item.representedObject as? String else { continue }
-            item.state = me.appState.theme == themeId ? .on : .off
-        }
-    }
-
-    // MARK: Actions
-
-    @objc private func selectTheme(_ sender: NSMenuItem) {
-        guard let themeId = sender.representedObject as? String else { return }
-        appState.setTheme(themeId)
-
-        // Update checkmarks
-        guard let menu = statusItem.menu else { return }
-        for item in menu.items {
-            guard let tid = item.representedObject as? String else { continue }
-            item.state = appState.theme == tid ? .on : .off
-        }
-
-        // Update status label
-        menu.items.first?.title = "Theme: \(themeId)"
-    }
-
-    @objc private func showHistory() {
-        appState.showHistory()
-    }
-
-    @objc private func quitApp() {
-        appState.cleanupAndQuit()
-    }
-
-    private func themeMenuItemTitle(_ theme: CardTheme) -> String {
-        switch theme.identifier {
-        case "dark-code":    return "🌑 Theme: Dark Code"
-        case "light-quote":  return "☀️ Theme: Light Quote"
-        case "minimal-gray": return "⬜ Theme: Minimal Gray"
-        default:             return "Theme: \(theme.identifier)"
-        }
+        NSLog("[PasteSnap] Menu configured with \(menu.numberOfItems) items")
     }
 }

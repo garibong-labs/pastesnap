@@ -107,8 +107,7 @@ final class AppState: ObservableObject {
                     self.statusMessage = "Card saved: \(fileURL.lastPathComponent)"
                     NSLog("[PasteSnap] Card saved and added to history (\(self.historyStore.items.count) items)")
 
-                    // Update menu bar theme checkmarks
-                    MenuBarController.updateThemeCheckmarks()
+                    // Theme checkmarks updated by MenuBarController.setTheme
                 }
             } catch {
                 await MainActor.run {
