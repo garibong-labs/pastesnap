@@ -7,18 +7,22 @@ final class AppState: ObservableObject {
     @Published var isMonitoring: Bool = false
     @Published var statusMessage: String = "Idle"
     @Published var theme: String
+    @Published var enabled: Bool
 
     private var clipboardMonitor: ClipboardMonitor?
     private let historyStore: HistoryStore
     private let hotkeyManager = HotkeyManager.shared
 
+    static let minTriggerLength: Int = 10
+
     init() {
         self.theme = UserDefaults.standard.string(forKey: "PST_selectedTheme") ?? "dark-code"
+        self.enabled = !UserDefaults.standard.bool(forKey: "PST_disabled")
         self.historyStore = HistoryStore()
     }
 
     func start() {
-        NSLog("[PasteSnap] AppState.start() called")
+        NSLog("[PasteSnap] AppState.start() called (enabled=\(self.enabled))")
 
         // Clipboard monitor
         let monitor = ClipboardMonitor { [weak self] change in
@@ -30,7 +34,7 @@ final class AppState: ObservableObject {
         monitor.start()
 
         isMonitoring = true
-        statusMessage = "Monitoring clipboard..."
+        statusMessage = enabled ? "Monitoring..." : "Paused"
 
         // Hotkey: ⌘⇧V → paste last generated image from history
         hotkeyManager.install { [weak self] in
@@ -43,6 +47,13 @@ final class AppState: ObservableObject {
     func setTheme(_ themeId: String) {
         self.theme = themeId
         UserDefaults.standard.set(themeId, forKey: "PST_selectedTheme")
+    }
+
+    func toggleEnabled() {
+        enabled.toggle()
+        UserDefaults.standard.set(!enabled, forKey: "PST_disabled")
+        statusMessage = enabled ? "Monitoring..." : "Paused"
+        NSLog("[PasteSnap] \(enabled ? "Enabled" : "Disabled")")
     }
 
     func showHistory() {
@@ -70,8 +81,17 @@ final class AppState: ObservableObject {
     // MARK: Clipboard Change
 
     private func onClipboardChange(_ change: ClipboardChange) {
+        // Skip when disabled
+        guard enabled else { return }
+
+        // Skip short text (URLs, single words, etc.)
+        guard change.newText.count >= Self.minTriggerLength else {
+            NSLog("[PasteSnap] Skipping short text (\(change.newText.count) chars)")
+            return
+        }
+
         let currentTheme = theme
-        NSLog("[PasteSnap] Processing clipboard change (theme=\(currentTheme))")
+        NSLog("[PasteSnap] Processing clipboard change: '\(change.newText.prefix(40))...' (\(change.newText.count) chars)")
 
         Task.detached {
             let cardTheme = CardTheme.from(identifier: currentTheme)
@@ -80,18 +100,6 @@ final class AppState: ObservableObject {
             do {
                 let fileURL = try CardRenderer.render(config: config)
                 NSLog("[PasteSnap] Rendered card: \(fileURL.path)")
-
-                // Write image to pasteboard immediately for instant paste
-                let nsImage = NSImage(contentsOf: fileURL)
-                if let image = nsImage, let tiff = image.tiffRepresentation {
-                    let pb = NSPasteboard.general
-                    pb.declareTypes([.tiff, .png], owner: nil)
-                    pb.setData(tiff, forType: .tiff)
-                    if let bitmap = NSBitmapImageRep(data: tiff),
-                       let png = bitmap.representation(using: .png, properties: [:]) {
-                        pb.setData(png, forType: .png)
-                    }
-                }
 
                 // Save to history (for ⌘⇧V later)
                 let item = HistoryItem(
@@ -102,12 +110,8 @@ final class AppState: ObservableObject {
 
                 await MainActor.run {
                     self.historyStore.addItem(item)
-
-                    // Update menu state
-                    self.statusMessage = "Card saved: \(fileURL.lastPathComponent)"
+                    self.statusMessage = "Card saved (\(self.historyStore.items.count))"
                     NSLog("[PasteSnap] Card saved and added to history (\(self.historyStore.items.count) items)")
-
-                    // Theme checkmarks updated by MenuBarController.setTheme
                 }
             } catch {
                 await MainActor.run {
