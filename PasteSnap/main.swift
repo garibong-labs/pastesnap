@@ -7,5 +7,5 @@ let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)  // menu bar only, no dock icon
-app.activate(ignoringOtherApps: false)
+app.activate(ignoringOtherApps: true)  // activate so menus can work
 app.run()
