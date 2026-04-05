@@ -30,7 +30,7 @@ final class ClipboardMonitor {
         guard timer == nil else { return }
 
         lastText = currentTextFromPasteboard() ?? ""
-        print("[PasteSnap] Monitor started, initial text: '\(lastText.prefix(60))'")
+        NSLog("[PasteSnap] Monitor started, initial text: '\(lastText.prefix(60))'")
 
         // Use .common mode so timer fires during UI tracking (menu, etc.)
         let t = Timer(
@@ -56,7 +56,7 @@ final class ClipboardMonitor {
 
         let oldText = lastText
         lastText = current
-        print("[PasteSnap] Clipboard changed: '\(current.prefix(60))'")
+        NSLog("[PasteSnap] Clipboard changed: '\(current.prefix(60))'")
 
         onChange(ClipboardChange(
             oldText: oldText,

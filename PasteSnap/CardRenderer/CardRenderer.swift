@@ -1,300 +1,149 @@
 import AppKit
 import Foundation
 import CoreGraphics
+import UniformTypeIdentifiers
+
+// MARK: - CardRenderer
 
 /// Renders card images from text using Core Graphics (CGContext pipeline).
-/// Thread-safe: can be called from background queues.
 struct CardRenderer {
 
-    // MARK: Public
-
-    /// Renders a card image and saves it as PNG.
-    /// - Returns: The file URL of the saved image.
     static func render(config: CardConfig) throws -> URL {
-        // Ensure output directory exists
-        let outputDir = FileManager.default.urls(
-            for: .picturesDirectory,
-            in: .userDomainMask
-        )[0].appendingPathComponent("PasteSnap", isDirectory: true)
+        // Create output folder
+        let outputDir = FileManager.default
+            .urls(for: .picturesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PasteSnap", isDirectory: true)
 
-        if !outputDir.hasDirectoryPath {
+        if !FileManager.default.fileExists(atPath: outputDir.path) {
             try FileManager.default.createDirectory(
-                at: outputDir,
-                withIntermediateDirectories: true
-            )
+                at: outputDir, withIntermediateDirectories: true)
         }
 
-        // Generate unique filename
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyyMMdd-HHmmss"
-        let timestamp = dateFormatter.string(from: Date())
-        let fileURL = outputDir.appendingPathComponent("\(timestamp).png")
+        let ts = DateFormatter()
+        ts.dateFormat = "yyyyMMdd-HHmmss"
+        let url = outputDir.appendingPathComponent("\(ts.string(from: Date())).png")
 
-        // Calculate image size (full canvas with background)
-        let canvasWidth = config.cardWidth + config.theme.padding * 2
-        let canvasHeight = config.cardHeight + config.theme.padding * 2
-        let scaledWidth = canvasWidth * config.outputScale
-        let scaledHeight = canvasHeight * config.outputScale
+        // Canvas size
+        let cw = config.cardWidth + config.theme.padding * 2
+        let ch = config.cardHeight + config.theme.padding * 2
+        let sw = cw * config.outputScale
+        let sh = ch * config.outputScale
 
-        // Create bitmap context
-        let bitsPerComponent = 8
-        let bytesPerRow = 4 * Int(scaledWidth)
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil, width: Int(sw), height: Int(sh),
+            bitsPerComponent: 8, bytesPerRow: 4 * Int(sw),
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { throw RenderError.contextFail }
 
-        guard let context = CGContext(
-            data: nil,
-            width: Int(scaledWidth),
-            height: Int(scaledHeight),
-            bitsPerComponent: bitsPerComponent,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            throw RenderError.contextCreationFailed
-        }
+        ctx.translateBy(x: 0, y: sh)
+        ctx.scaleBy(x: 1, y: -1)
 
-        // Flip coordinate system for standard top-down drawing
-        context.translateBy(x: 0, y: scaledHeight)
-        context.scaleBy(x: 1, y: -1)
+        // ── 1. background ──
+        ctx.setFillColor(hex(config.theme.backgroundColor))
+        ctx.fill(CGRect(origin: .zero, size: CGSize(width: sw, height: sh)))
 
-        // 1. Draw outer background
-        guard let bgNSColor = NSColorFactory.from(hexString: config.theme.backgroundColor) else {
-            throw RenderError.invalidColor(config.theme.backgroundColor)
-        }
-        bgNSColor.setFill()
-        context.fill(CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight))
+        // ── 2. card with shadow ──
+        let pad = config.theme.padding * config.outputScale
+        let cr  = config.theme.cornerRadius * config.outputScale
+        let card = CGRect(x: pad, y: pad,
+                           width: config.cardWidth  * config.outputScale,
+                           height: config.cardHeight * config.outputScale)
 
-        // 2. Draw card with drop shadow
-        let cardRect = CGRect(
-            x: config.theme.padding * config.outputScale,
-            y: config.theme.padding * config.outputScale,
-            width: config.cardWidth * config.outputScale,
-            height: config.cardHeight * config.outputScale
-        )
-        let cornerRadius = config.theme.cornerRadius * config.outputScale
+        ctx.setShadow(offset: CGSize(width: 0, height: 4 * config.outputScale),
+                      blur: 16 * config.outputScale,
+                      color: CGColor(gray: 0, alpha: 0.12))
+        ctx.addRoundedRectPath(card, cr: cr)
+        ctx.setFillColor(hex(config.theme.cardBackground))
+        ctx.fillPath()
+        ctx.setShadow(offset: .zero, blur: 0, color: nil)
 
-        drawShadow(context: context, rect: cardRect, cornerRadius: cornerRadius, scale: config.outputScale)
+        // ── 3. accent bar ──
+        let aw = 48 * config.outputScale
+        ctx.addRoundedRectPath(
+            CGRect(x: card.midX - aw / 2, y: card.minY + 10 * config.outputScale,
+                    width: aw, height: 6 * config.outputScale),
+            cr: 3 * config.outputScale)
+        ctx.setFillColor(hex(config.theme.accentColor))
+        ctx.fillPath()
 
-        // 3. Draw card background
-        guard let cardNSColor = NSColorFactory.from(hexString: config.theme.cardBackground) else {
-            throw RenderError.invalidColor(config.theme.cardBackground)
-        }
-        cardNSColor.setFill()
-        let cardPath = CGRoundedRect(rect: cardRect, cornerRadius: cornerRadius)
-        context.addPath(cardPath)
-        context.fillPath()
+        // ── 4. text ──
+        let tx = card.minX + pad
+        let ty = card.minY + 24 * config.outputScale
+        let tw = card.width - pad * 2
+        let th = card.height - 24 * config.outputScale - pad
+        let tRect = CGRect(x: tx, y: ty, width: tw, height: th)
 
-        // 4. Draw accent bar at top
-        drawAccentBar(
-            context: context,
-            cardRect: cardRect,
-            accentColor: config.theme.accentColor,
-            scale: config.outputScale,
-            cornerRadius: cornerRadius
-        )
-
-        // 5. Render text
-        let textRect = CGRect(
-            x: cardRect.origin.x + config.theme.padding * config.outputScale,
-            y: cardRect.origin.y + (12 * config.outputScale) + config.theme.padding * config.outputScale,
-            width: cardRect.size.width - (config.theme.padding * 2 * config.outputScale),
-            height: cardRect.size.height - (12 * config.outputScale) - (config.theme.padding * 3 * config.outputScale)
-        )
-        renderText(
-            context: context,
-            text: config.text,
-            in: textRect,
-            theme: config.theme,
-            scale: config.outputScale
-        )
-
-        // 6. Draw watermark
-        drawWatermark(
-            context: context,
-            canvasWidth: scaledWidth,
-            canvasHeight: scaledHeight,
-            scale: config.outputScale
-        )
-
-        // 7. Save as PNG
-        guard let cgImage = context.makeImage() else {
-            throw RenderError.imageCreationFailed
-        }
-        let nsImage = NSImage(cgImage: cgImage, size: CGSize(width: scaledWidth, height: scaledHeight))
-
-        guard let tiffData = nsImage.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiffData),
-              let pngData = bitmap.representation(using: .png, properties: [.compressionFactor: 0.9]) else {
-            throw RenderError.encodingFailed
-        }
-        try pngData.write(to: fileURL)
-
-        return fileURL
-    }
-
-    // MARK: Private Drawing Helpers
-
-    private static func drawShadow(
-        context: CGContext,
-        rect: CGRect,
-        cornerRadius: CGFloat,
-        scale: CGFloat
-    ) {
-        let shadowOffset = CGSize(width: 0, height: 4 * scale)
-        let shadowBlur = 16 * scale
-        let shadowColor = NSColor.black.withAlphaComponent(0.12).cgColor
-
-        context.setShadow(offset: shadowOffset, blur: shadowBlur, color: shadowColor)
-
-        let path = CGRoundedRect(rect: rect, cornerRadius: cornerRadius)
-        context.addPath(path)
-        context.setFillColor(NSColor.black.cgColor)
-        context.fillPath()
-
-        // Reset shadow
-        context.setShadow(offset: CGSize.zero, blur: 0, color: nil)
-    }
-
-    private static func drawAccentBar(
-        context: CGContext,
-        cardRect: CGRect,
-        accentColor: String,
-        scale: CGFloat,
-        cornerRadius: CGFloat
-    ) {
-        guard let accentNSColor = NSColorFactory.from(hexString: accentColor) else { return }
-
-        let barHeight = 6 * scale
-        let barWidth = 48 * scale
-        let barX = cardRect.origin.x + (cardRect.size.width - barWidth) / 2
-        let barY = cardRect.origin.y + (12 * scale) - (barHeight / 2)
-
-        let barRect = CGRect(x: barX, y: barY, width: barWidth, height: barHeight)
-        let barPath = CGPath(roundedRect: barRect, cornerWidth: cornerRadius / 2, cornerHeight: cornerRadius / 2, transform: nil)
-
-        context.setFillColor(accentNSColor.cgColor)
-        context.addPath(barPath)
-        context.fillPath()
-    }
-
-    private static func renderText(
-        context: CGContext,
-        text: String,
-        in rect: CGRect,
-        theme: CardTheme,
-        scale: CGFloat
-    ) {
-        guard let textColor = NSColorFactory.from(hexString: theme.textColor) else { return }
-
-        // Find a valid font (fallback chain)
-        let font = findFont(name: theme.fontFamily, size: theme.fontSize * scale)
-
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.alignment = .natural
-        paragraphStyle.lineBreakMode = .byWordWrapping
-
-        let attributes: [NSAttributedString.Key: Any] = [
-            .foregroundColor: textColor,
+        let font = findFont(config.theme.fontFamily, size: config.theme.fontSize * config.outputScale)
+        let ps = NSMutableParagraphStyle()
+        ps.lineBreakMode = .byWordWrapping
+        let attrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor(cgColor: hex(config.theme.textColor)),
             .font: font,
-            .paragraphStyle: paragraphStyle,
+            .paragraphStyle: ps
         ]
+        NSAttributedString(string: config.text, attributes: attrs).draw(in: tRect)
 
-        let attributedString = NSAttributedString(string: text, attributes: attributes)
+        // ── 5. watermark ──
+        let wf = NSFont.systemFont(ofSize: 8 * config.outputScale, weight: .light)
+        let wps = NSMutableParagraphStyle()
+        wps.alignment = .right
+        let wa: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.systemGray.withAlphaComponent(0.4),
+            .font: wf,
+            .paragraphStyle: wps
+        ]
+        let wRect = CGRect(x: sw - 100 * config.outputScale,
+                            y: sh - 30 * config.outputScale,
+                            width: 80 * config.outputScale, height: 20 * config.outputScale)
+        NSAttributedString(string: "PasteSnap", attributes: wa).draw(in: wRect)
 
-        // Draw text in context
-        let textRect = CGRect(x: rect.origin.x, y: rect.origin.y, width: rect.width, height: rect.height)
-        attributedString.draw(in: textRect)
+        // ── 6. save PNG ──
+        guard let img = ctx.makeImage() else { throw RenderError.imageFail }
+        guard let dest = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.png.identifier as CFString, 1, nil)
+        else { throw RenderError.encodeFail }
+        CGImageDestinationAddImage(dest, img, nil)
+        guard CGImageDestinationFinalize(dest) else { throw RenderError.encodeFail }
+
+        NSLog("[PasteSnap] ✅ Card saved: \(url.path)")
+        return url
     }
 
-    private static func findFont(name: String, size: CGFloat) -> NSFont {
-        // System font shortcuts
-        if name.starts(with: "."), size > 0 {
-            return NSFont.systemFont(ofSize: size, weight: .regular)
-        }
-        if let font = NSFont(name: name, size: size) {
-            return font
-        }
+    // ——— helpers ———
 
-        // Fallback chain
-        let fallbacks = ["SF Mono", "Menlo", "Courier New", ".SFNS-Regular"]
-        for fallback in fallbacks {
-            if let font = NSFont(name: fallback, size: size) {
-                return font
-            }
+    private static func hex(_ s: String) -> CGColor {
+        var h = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if h.hasPrefix("#") { h.removeFirst() }
+        guard let v = UInt64(h, radix: 16) else { return CGColor.white }
+        return CGColor(
+            red:   CGFloat((v >> 16) & 0xFF) / 255,
+            green: CGFloat((v >> 8)  & 0xFF) / 255,
+            blue:  CGFloat(v & 0xFF) / 255,
+            alpha: 1)
+    }
+
+    private static func findFont(_ name: String, size: CGFloat) -> NSFont {
+        if let f = NSFont(name: name, size: size) { return f }
+        for fb in ["SF Mono", "Menlo", "Courier New"] {
+            if let f = NSFont(name: fb, size: size) { return f }
         }
         return NSFont.systemFont(ofSize: size)
-    }
-
-    private static func drawWatermark(
-        context: CGContext,
-        canvasWidth: CGFloat,
-        canvasHeight: CGFloat,
-        scale: CGFloat
-    ) {
-        let font = NSFont.systemFont(ofSize: 8 * scale, weight: .light)
-        let textColor = NSColor.systemGray.withAlphaComponent(0.4)
-
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.alignment = .right
-        let attributes: [NSAttributedString.Key: Any] = [
-            .foregroundColor: textColor,
-            .font: font,
-            .paragraphStyle: paragraphStyle,
-        ]
-
-        let watermarkText = NSAttributedString(
-            string: "PasteSnap",
-            attributes: attributes
-        )
-        let textRect = CGRect(
-            x: canvasWidth - (100 * scale),
-            y: canvasHeight - (30 * scale),
-            width: 80 * scale,
-            height: 20 * scale
-        )
-        watermarkText.draw(in: textRect)
     }
 }
 
 // MARK: - Errors
 
-enum RenderError: LocalizedError {
-    case contextCreationFailed
-    case invalidColor(String)
-    case imageCreationFailed
-    case encodingFailed
-
-    var errorDescription: String? {
-        switch self {
-        case .contextCreationFailed: return "Failed to create graphics context"
-        case let .invalidColor(hex): return "Invalid color: \(hex)"
-        case .imageCreationFailed: return "Failed to create CGImage"
-        case .encodingFailed: return "Failed to encode image as PNG"
-        }
-    }
+enum RenderError: Error {
+    case contextFail, imageFail, encodeFail
 }
 
-// MARK: - NSColor Factory
+// MARK: - Conveniences
 
-enum NSColorFactory {
-    /// Create a color from a hex string like "#1E1E2E" or "1E1E2E".
-    static func from(hexString: String) -> NSColor? {
-        var hex = hexString.trimmingCharacters(in: .whitespacesAndNewlines)
-        if hex.hasPrefix("#") {
-            hex.removeFirst()
-        }
-        guard hex.count == 6, let rgb = UInt64(hex, radix: 16) else { return nil }
-
-        let r = Double((rgb >> 16) & 0xFF) / 255.0
-        let g = Double((rgb >> 8) & 0xFF) / 255.0
-        let b = Double(rgb & 0xFF) / 255.0
-
-        return NSColor(red: r, green: g, blue: b, alpha: 1.0)
+private extension CGContext {
+    func addRoundedRectPath(_ r: CGRect, cr: CGFloat) {
+        let path = CGMutablePath()
+        path.addRoundedRect(in: r, cornerWidth: cr, cornerHeight: cr)
+        addPath(path)
     }
-}
-
-private func CGRoundedRect(rect: CGRect, cornerRadius: CGFloat) -> CGMutablePath {
-    let path = CGMutablePath()
-    path.addRoundedRect(in: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius)
-    return path
 }

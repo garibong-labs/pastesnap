@@ -1,77 +1,70 @@
 import Foundation
 import AppKit
 
-/// Manages the ⌘⇧V hotkey.
-/// Uses NSEvent local monitor (when app is active) + global monitor (when app is in background).
+/// ⌘⇧V global hotkey.
+/// Uses NSEvent.addGlobalMonitorForEvents — works after the app is activated once.
 @MainActor
 final class HotkeyManager {
     static let shared = HotkeyManager()
 
-    /// Supplier closure that returns the image to paste.
-    private var imageSupplier: (() -> NSImage?)?
-
-    /// Strong reference required — the monitor stops if this is released.
+    private var globalMonitor: Any?
     private var localMonitor: Any?
-
+    private var imageSupplier: (() -> NSImage?)?
     private var isInstalled = false
 
     private init() {}
 
-    // MARK: Public
-
-    /// Install key event monitors.
-    /// `imageSupplier` is called on each ⌘⇧V press to retrieve the last card image.
     func install(imageSupplier: @escaping () -> NSImage?) {
         guard !isInstalled else { return }
         self.imageSupplier = imageSupplier
-
-        // Local monitor: fires when the app has focus/eats key events
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event -> NSEvent? in
-            guard let self, self.matchesPaste(event: event) else { return event }
-            self.pasteLastImage()
-            return nil // consume
-        }
-
-        // Global monitor: fires even when app is in background (menu bar only)
-        NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.matchesPaste(event: event) else { return }
-            self.pasteLastImage()
-        }
-
         isInstalled = true
+
+        // Local monitor (app active/menu open)
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if self.isPasteShortcut(event) {
+                self.triggerPaste()
+                return nil
+            }
+            return event
+        }
+
+        // Global monitor (app in background) — requires Accessibility permission for LSUIElement
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+            if self.isPasteShortcut(event) {
+                self.triggerPaste()
+            }
+        }
+
+        NSLog("[PasteSnap] ⌘⇧V hotkey installed")
     }
 
     func uninstall() {
-        isInstalled = false
-        localMonitor = nil
+        if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
+        if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
         imageSupplier = nil
+        isInstalled = false
     }
 
-    // MARK: Private
-
-    private func matchesPaste(event: NSEvent) -> Bool {
+    private func isPasteShortcut(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        return flags == [.command, .shift] && event.keyCode == 0x09  // V key
+        return flags == [.command, .shift] && event.keyCode == 0x09 // V
     }
 
-    private func pasteLastImage() {
-        guard let image = imageSupplier?() else { return }
-        writeImageToPasteboard(image)
-    }
-
-    private func writeImageToPasteboard(_ image: NSImage) {
+    func triggerPaste() {
+        guard let supplier = imageSupplier, let image = supplier() else {
+            NSLog("[PasteSnap] ⌘⇧V — no image to paste")
+            return
+        }
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.declareTypes([.tiff, .png], owner: nil)
-
         if let tiff = image.tiffRepresentation {
+            pb.declareTypes([.tiff, .png], owner: nil)
             pb.setData(tiff, forType: .tiff)
-        }
-
-        if let tiff = image.tiffRepresentation,
-           let bitmap = NSBitmapImageRep(data: tiff),
-           let png = bitmap.representation(using: .png, properties: [:]) {
-            pb.setData(png, forType: .png)
+            if let bm = NSBitmapImageRep(data: tiff),
+               let png = bm.representation(using: .png, properties: [:]) {
+                pb.setData(png, forType: .png)
+            }
+            NSLog("[PasteSnap] ⌘⇧V — image pasted")
         }
     }
 }

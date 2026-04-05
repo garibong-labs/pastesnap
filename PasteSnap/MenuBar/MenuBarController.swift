@@ -4,6 +4,8 @@ import Foundation
 /// Controls the NSStatusItem and its associated menu.
 @MainActor
 final class MenuBarController {
+    private static weak var sharedInstance: MenuBarController?
+
     private let statusItem: NSStatusItem
     private let appState: AppState
 
@@ -13,9 +15,10 @@ final class MenuBarController {
 
         setupMenuBarIcon()
         setupMenu()
+        
+        // Register after menu is set up
+        Self.sharedInstance = self
     }
-
-    // MARK: Menu Bar Icon
 
     private func setupMenuBarIcon() {
         let image = NSImage(systemSymbolName: "text.quote", accessibilityDescription: "PasteSnap")
@@ -24,10 +27,13 @@ final class MenuBarController {
         statusItem.button?.image = image
     }
 
-    // MARK: Menu Setup
-
     private func setupMenu() {
         let menu = NSMenu()
+
+        // Status label
+        let statusItem = NSMenuItem(title: "Monitoring", action: nil, keyEquivalent: "")
+        statusItem.isEnabled = false
+        menu.addItem(statusItem)
 
         // Separator
         menu.addItem(NSMenuItem.separator())
@@ -45,31 +51,34 @@ final class MenuBarController {
             menu.addItem(item)
         }
 
-        // Separator
         menu.addItem(NSMenuItem.separator())
 
         // History
-        let historyMenuItem = NSMenuItem(
-            title: "📋 History",
-            action: #selector(showHistory),
-            keyEquivalent: ""
-        )
-        historyMenuItem.target = self
-        menu.addItem(historyMenuItem)
+        let histItem = NSMenuItem(title: "📋 History", action: #selector(showHistory), keyEquivalent: "")
+        histItem.target = self
+        menu.addItem(histItem)
 
         // Separator
         menu.addItem(NSMenuItem.separator())
 
         // Quit
-        let quitItem = NSMenuItem(
-            title: "❌ Quit",
-            action: #selector(quitApp),
-            keyEquivalent: "q"
-        )
+        let quitItem = NSMenuItem(title: "❌ Quit", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+    }
+
+    // MARK: Static (called from AppState)
+
+    /// Update theme checkmarks in the menu bar menu after theme switch.
+    static func updateThemeCheckmarks() {
+        guard let me = Self.sharedInstance else { return }
+        guard let menu = me.statusItem.menu else { return }
+        for item in menu.items {
+            guard let themeId = item.representedObject as? String else { continue }
+            item.state = me.appState.theme == themeId ? .on : .off
+        }
     }
 
     // MARK: Actions
@@ -77,7 +86,16 @@ final class MenuBarController {
     @objc private func selectTheme(_ sender: NSMenuItem) {
         guard let themeId = sender.representedObject as? String else { return }
         appState.setTheme(themeId)
-        updateMenuThemeStates()
+
+        // Update checkmarks
+        guard let menu = statusItem.menu else { return }
+        for item in menu.items {
+            guard let tid = item.representedObject as? String else { continue }
+            item.state = appState.theme == tid ? .on : .off
+        }
+
+        // Update status label
+        menu.items.first?.title = "Theme: \(themeId)"
     }
 
     @objc private func showHistory() {
@@ -88,22 +106,12 @@ final class MenuBarController {
         appState.cleanupAndQuit()
     }
 
-    // MARK: Menu Helpers
-
     private func themeMenuItemTitle(_ theme: CardTheme) -> String {
         switch theme.identifier {
-        case "dark-code":  return "🌑 Theme: Dark Code"
-        case "light-quote": return "☀️ Theme: Light Quote"
+        case "dark-code":    return "🌑 Theme: Dark Code"
+        case "light-quote":  return "☀️ Theme: Light Quote"
         case "minimal-gray": return "⬜ Theme: Minimal Gray"
-        default:          return "Theme: \(theme.identifier)"
-        }
-    }
-
-    private func updateMenuThemeStates() {
-        guard let menu = statusItem.menu else { return }
-        for item in menu.items {
-            guard let themeId = item.representedObject as? String else { continue }
-            item.state = appState.theme == themeId ? .on : .off
+        default:             return "Theme: \(theme.identifier)"
         }
     }
 }

@@ -11,7 +11,6 @@ final class AppState: ObservableObject {
     private var clipboardMonitor: ClipboardMonitor?
     private let historyStore: HistoryStore
     private let hotkeyManager = HotkeyManager.shared
-    private var lastGeneratedImage: NSImage?
 
     init() {
         self.theme = UserDefaults.standard.string(forKey: "PST_selectedTheme") ?? "dark-code"
@@ -19,7 +18,7 @@ final class AppState: ObservableObject {
     }
 
     func start() {
-        print("[PasteSnap] AppState.start() called")
+        NSLog("[PasteSnap] AppState.start() called")
 
         // Clipboard monitor
         let monitor = ClipboardMonitor { [weak self] change in
@@ -33,12 +32,12 @@ final class AppState: ObservableObject {
         isMonitoring = true
         statusMessage = "Monitoring clipboard..."
 
-        // Hotkey
+        // Hotkey: ⌘⇧V → paste last generated image from history
         hotkeyManager.install { [weak self] in
-            self?.lastGeneratedImage
+            self?.historyStore.latestImage()
         }
 
-        print("[PasteSnap] All subsystems started")
+        NSLog("[PasteSnap] All subsystems started")
     }
 
     func setTheme(_ themeId: String) {
@@ -53,10 +52,10 @@ final class AppState: ObservableObject {
         alert.informativeText = items.isEmpty
             ? "No clipboard cards generated yet."
             : items.map { item in
-                let date = Date(timeIntervalSince1970: item.createdAt)
-                let formatter = DateFormatter()
-                formatter.dateFormat = "MM/dd HH:mm"
-                return "• [\(item.theme)] \(formatter.string(from: date)) — \(item.text.prefix(40))"
+                let d = Date(timeIntervalSince1970: item.createdAt)
+                let fmt = DateFormatter()
+                fmt.dateFormat = "MM/dd HH:mm"
+                return "• [\(item.theme)] \(fmt.string(from: d)) — \(item.text.prefix(40))"
             }.joined(separator: "\n")
         alert.addButton(withTitle: "OK")
         alert.runModal()
@@ -68,50 +67,53 @@ final class AppState: ObservableObject {
         NSApplication.shared.terminate(nil)
     }
 
+    // MARK: Clipboard Change
+
     private func onClipboardChange(_ change: ClipboardChange) {
-        print("[PasteSnap] Processing clipboard change (theme=\(theme))")
+        let currentTheme = theme
+        NSLog("[PasteSnap] Processing clipboard change (theme=\(currentTheme))")
 
-        let currentTheme = self.theme
-
-        Task.detached { [weak self] in
-            guard let self else { return }
-
-            let theme = CardTheme.from(identifier: currentTheme)
-            let config = CardConfig(text: change.newText, theme: theme)
+        Task.detached {
+            let cardTheme = CardTheme.from(identifier: currentTheme)
+            let config = CardConfig(text: change.newText, theme: cardTheme)
 
             do {
                 let fileURL = try CardRenderer.render(config: config)
-                print("[PasteSnap] Rendered card: \(fileURL.path)")
+                NSLog("[PasteSnap] Rendered card: \(fileURL.path)")
 
+                // Write image to pasteboard immediately for instant paste
                 let nsImage = NSImage(contentsOf: fileURL)
-
-                await MainActor.run {
-                    self.lastGeneratedImage = nsImage
-
-                    // Write to pasteboard so user can Cmd+V immediately
+                if let image = nsImage, let tiff = image.tiffRepresentation {
                     let pb = NSPasteboard.general
                     pb.declareTypes([.tiff, .png], owner: nil)
-                    if let image = nsImage, let tiff = image.tiffRepresentation {
-                        pb.setData(tiff, forType: .tiff)
-                        if let bitmap = NSBitmapImageRep(data: tiff),
-                           let png = bitmap.representation(using: .png, properties: [:]) {
-                            pb.setData(png, forType: .png)
-                        }
+                    pb.setData(tiff, forType: .tiff)
+                    if let bitmap = NSBitmapImageRep(data: tiff),
+                       let png = bitmap.representation(using: .png, properties: [:]) {
+                        pb.setData(png, forType: .png)
                     }
+                }
 
-                    self.historyStore.addItem(HistoryItem(
-                        text: change.newText,
-                        imagePath: fileURL.path,
-                        theme: theme.identifier
-                    ))
+                // Save to history (for ⌘⇧V later)
+                let item = HistoryItem(
+                    text: change.newText,
+                    imagePath: fileURL.path,
+                    theme: cardTheme.identifier
+                )
 
+                await MainActor.run {
+                    self.historyStore.addItem(item)
+
+                    // Update menu state
                     self.statusMessage = "Card saved: \(fileURL.lastPathComponent)"
-                    print("[PasteSnap] Card saved and added to history")
+                    NSLog("[PasteSnap] Card saved and added to history (\(self.historyStore.items.count) items)")
+
+                    // Update menu bar theme checkmarks
+                    MenuBarController.updateThemeCheckmarks()
                 }
             } catch {
                 await MainActor.run {
                     self.statusMessage = "Render error: \(error.localizedDescription)"
-                    print("[PasteSnap] Render error: \(error)")
+                    NSLog("[PasteSnap] Render error: \(error)")
                 }
             }
         }

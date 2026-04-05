@@ -1,29 +1,18 @@
 import AppKit
 import Foundation
 
-/// Application entry point.
-/// Keeps AppDelegate alive as a static property so ARC doesn't collect it.
-@main
-struct PasteSnapApp {
-    nonisolated(unsafe) static var appDelegate: AppDelegate?
-
-    static func main() {
-        let delegate = AppDelegate()
-        Self.appDelegate = delegate
-        NSApplication.shared.delegate = delegate
-        _ = withExtendedLifetime(delegate) {
-            NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
-        }
-    }
-}
-
-/// Main application delegate.
+/// Main application delegate — created via main.swift NIB-less bootstrap.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private(set) static var shared: AppDelegate?
+    
     private var appState: AppState?
     private var menuBarController: MenuBarController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.shared = self
+        NSLog("[PasteSnap] applicationDidFinishLaunching — wiring subsystems")
+
         let state = AppState()
         self.appState = state
 
