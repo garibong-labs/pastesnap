@@ -1,111 +1,121 @@
 import AppKit
-import Foundation
 import CoreGraphics
 import UniformTypeIdentifiers
 
-// MARK: - CardRenderer
-
-/// Renders card images from text using Core Graphics (CGContext pipeline).
 struct CardRenderer {
 
     static func render(config: CardConfig) throws -> URL {
-        // Create output folder
         let outputDir = FileManager.default
             .urls(for: .picturesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("PasteSnap", isDirectory: true)
 
         if !FileManager.default.fileExists(atPath: outputDir.path) {
-            try FileManager.default.createDirectory(
-                at: outputDir, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
         }
 
         let ts = DateFormatter()
         ts.dateFormat = "yyyyMMdd-HHmmss"
         let url = outputDir.appendingPathComponent("\(ts.string(from: Date())).png")
 
-        // Canvas size
-        let cw = config.cardWidth + config.theme.padding * 2
-        let ch = config.cardHeight + config.theme.padding * 2
-        let sw = cw * config.outputScale
-        let sh = ch * config.outputScale
+        let cw = config.cardWidth
+        let ch = config.cardHeight
+        let s  = config.outputScale
 
-        guard let ctx = CGContext(
-            data: nil, width: Int(sw), height: Int(sh),
-            bitsPerComponent: 8, bytesPerRow: 4 * Int(sw),
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { throw RenderError.contextFail }
+        // ── Render in point space, NSImage handles resolution ──
+        let cardImage = NSImage(size: NSSize(width: cw, height: ch), flipped: true) { bounds in
+            let pad = config.theme.padding
+            let cr = config.theme.cornerRadius
+            let card = CGRect(x: pad, y: pad, width: cw - pad * 2, height: ch - pad * 2)
+            let ctx = NSGraphicsContext.current!.cgContext
 
-        ctx.translateBy(x: 0, y: sh)
-        ctx.scaleBy(x: 1, y: -1)
+            // 1. outer background
+            ctx.setFillColor(hex(config.theme.backgroundColor))
+            ctx.fill(bounds)
 
-        // ── 1. background ──
-        ctx.setFillColor(hex(config.theme.backgroundColor))
-        ctx.fill(CGRect(origin: .zero, size: CGSize(width: sw, height: sh)))
+            // 2. card + shadow
+            ctx.setShadow(offset: CGSize(width: 0, height: 4), blur: 16,
+                          color: CGColor(gray: 0, alpha: 0.12))
+            let cardPath = CGMutablePath()
+            cardPath.addRoundedRect(in: card, cornerWidth: cr, cornerHeight: cr)
+            ctx.addPath(cardPath)
+            ctx.setFillColor(hex(config.theme.cardBackground))
+            ctx.fillPath()
+            ctx.setShadow(offset: .zero, blur: 0, color: nil)
 
-        // ── 2. card with shadow ──
-        let pad = config.theme.padding * config.outputScale
-        let cr  = config.theme.cornerRadius * config.outputScale
-        let card = CGRect(x: pad, y: pad,
-                           width: config.cardWidth  * config.outputScale,
-                           height: config.cardHeight * config.outputScale)
+            // 3. accent bar
+            let aw: CGFloat = 48
+            let accentPath = CGMutablePath()
+            accentPath.addRoundedRect(
+                in: CGRect(x: card.midX - aw / 2, y: card.minY + 12, width: aw, height: 6),
+                cornerWidth: 3, cornerHeight: 3)
+            ctx.addPath(accentPath)
+            ctx.setFillColor(hex(config.theme.accentColor))
+            ctx.fillPath()
 
-        ctx.setShadow(offset: CGSize(width: 0, height: 4 * config.outputScale),
-                      blur: 16 * config.outputScale,
-                      color: CGColor(gray: 0, alpha: 0.12))
-        ctx.addRoundedRectPath(card, cr: cr)
-        ctx.setFillColor(hex(config.theme.cardBackground))
-        ctx.fillPath()
-        ctx.setShadow(offset: .zero, blur: 0, color: nil)
+            // 4. text
+            let textPad: CGFloat = 28
+            let textRect = CGRect(
+                x: card.minX + textPad,
+                y: card.minY + 28,
+                width: card.width - textPad * 2,
+                height: card.height - 28 - textPad
+            )
 
-        // ── 3. accent bar ──
-        let aw = 48 * config.outputScale
-        ctx.addRoundedRectPath(
-            CGRect(x: card.midX - aw / 2, y: card.minY + 10 * config.outputScale,
-                    width: aw, height: 6 * config.outputScale),
-            cr: 3 * config.outputScale)
-        ctx.setFillColor(hex(config.theme.accentColor))
-        ctx.fillPath()
+            let font = findFont(config.theme.fontFamily, size: config.theme.fontSize)
+            let ps = NSMutableParagraphStyle()
+            ps.lineBreakMode = .byWordWrapping
+            let attrs: [NSAttributedString.Key: Any] = [
+                .foregroundColor: NSColor(cgColor: hex(config.theme.textColor)),
+                .font: font,
+                .paragraphStyle: ps
+            ]
+            let attributed = NSAttributedString(string: config.text, attributes: attrs)
 
-        // ── 4. text ──
-        let tx = card.minX + pad
-        let ty = card.minY + 24 * config.outputScale
-        let tw = card.width - pad * 2
-        let th = card.height - 24 * config.outputScale - pad
-        let tRect = CGRect(x: tx, y: ty, width: tw, height: th)
+            // Measure to center vertically if shorter than card
+            let textSize = attributed.boundingRect(
+                with: CGSize(width: textRect.width, height: .greatestFiniteMagnitude),
+                options: .usesLineFragmentOrigin).size
 
-        let font = findFont(config.theme.fontFamily, size: config.theme.fontSize * config.outputScale)
-        let ps = NSMutableParagraphStyle()
-        ps.lineBreakMode = .byWordWrapping
-        let attrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor(cgColor: hex(config.theme.textColor)),
-            .font: font,
-            .paragraphStyle: ps
-        ]
-        NSAttributedString(string: config.text, attributes: attrs).draw(in: tRect)
+            var finalRect = textRect
+            if textSize.height < textRect.height {
+                finalRect.origin.y += (textRect.height - textSize.height) / 2
+                finalRect.size.height = textSize.height
+            }
+            attributed.draw(in: finalRect)
 
-        // ── 5. watermark ──
-        let wf = NSFont.systemFont(ofSize: 8 * config.outputScale, weight: .light)
-        let wps = NSMutableParagraphStyle()
-        wps.alignment = .right
-        let wa: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor.systemGray.withAlphaComponent(0.4),
-            .font: wf,
-            .paragraphStyle: wps
-        ]
-        let wRect = CGRect(x: sw - 100 * config.outputScale,
-                            y: sh - 30 * config.outputScale,
-                            width: 80 * config.outputScale, height: 20 * config.outputScale)
-        NSAttributedString(string: "PasteSnap", attributes: wa).draw(in: wRect)
+            // 5. watermark
+            let wf = NSFont.systemFont(ofSize: 8, weight: .light)
+            let wps = NSMutableParagraphStyle()
+            wps.alignment = .right
+            NSAttributedString(
+                string: "PasteSnap",
+                attributes: [.foregroundColor: NSColor.systemGray.withAlphaComponent(0.4),
+                             .font: wf,
+                             .paragraphStyle: wps]
+            ).draw(in: CGRect(x: cw - 100, y: ch - 30, width: 80, height: 20))
 
-        // ── 6. save PNG ──
-        guard let img = ctx.makeImage() else { throw RenderError.imageFail }
-        guard let dest = CGImageDestinationCreateWithURL(
-            url as CFURL, UTType.png.identifier as CFString, 1, nil)
-        else { throw RenderError.encodeFail }
-        CGImageDestinationAddImage(dest, img, nil)
-        guard CGImageDestinationFinalize(dest) else { throw RenderError.encodeFail }
+            return true
+        }
 
+        // ── Export PNG at @2x (scale is applied via bestRepresentationFor) ──
+        let pixelSize = NSSize(width: cw * s, height: ch * s)
+        guard let rep = cardImage.bestRepresentation(for: NSRect(origin: .zero, size: pixelSize),
+                                                      context: nil,
+                                                      hints: [.ctm: AffineTransform(scale: s)]) else {
+            throw RenderError.imageFail
+        }
+
+        let tmpImage = NSImage(size: pixelSize)
+        tmpImage.lockFocus()
+        rep.draw(in: NSRect(origin: .zero, size: pixelSize))
+        tmpImage.unlockFocus()
+
+        guard let tiff = tmpImage.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff) else {
+            throw RenderError.encodeFail
+        }
+        let png = bitmap.representation(using: .png, properties: [.compressionFactor: 0.9])!
+        try png.write(to: url)
         NSLog("[PasteSnap] ✅ Card saved: \(url.path)")
         return url
     }
@@ -125,25 +135,11 @@ struct CardRenderer {
 
     private static func findFont(_ name: String, size: CGFloat) -> NSFont {
         if let f = NSFont(name: name, size: size) { return f }
-        for fb in ["SF Mono", "Menlo", "Courier New"] {
+        for fb in ["SF Mono", "Menlo", "Monaco", "Courier New"] {
             if let f = NSFont(name: fb, size: size) { return f }
         }
-        return NSFont.systemFont(ofSize: size)
+        return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
     }
 }
 
-// MARK: - Errors
-
-enum RenderError: Error {
-    case contextFail, imageFail, encodeFail
-}
-
-// MARK: - Conveniences
-
-private extension CGContext {
-    func addRoundedRectPath(_ r: CGRect, cr: CGFloat) {
-        let path = CGMutablePath()
-        path.addRoundedRect(in: r, cornerWidth: cr, cornerHeight: cr)
-        addPath(path)
-    }
-}
+enum RenderError: Error { case contextFail, imageFail, encodeFail }
