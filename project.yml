@@ -1,0 +1,36 @@
+# project.yml — PasteSnap Xcode project spec
+
+name: PasteSnap
+options:
+  bundleIdPrefix: dev.garibong
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "17.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+targets:
+  PasteSnap:
+    type: application
+    platform: macOS
+    sources: [PasteSnap]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.garibong.pastesnap
+        INFOPLIST_KEY_LSUIElement: true  # menu bar only (no dock icon)
+        INFOPLIST_KEY_NSMainStoryboardFile: ""
+        INFOPLIST_KEY_NSPrincipalClass: NSApplication
+        INFOPLIST_KEY_NSAppleEventsUsageDescription: "PasteSnap needs accessibility access to monitor clipboard changes."
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+    dependencies:
+      - sdk: Cocoa.framework
+      - sdk: Foundation.framework
+      - sdk: AppKit.framework
+      - sdk: SwiftUI.framework
+      - sdk: UniformTypeIdentifiers.framework
