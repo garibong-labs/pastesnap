@@ -3,7 +3,7 @@ import Foundation
 
 /// Controls the NSStatusItem and its associated menu.
 @MainActor
-final class MenuBarController {
+final class MenuBarController: NSObject {
     private static weak var sharedInstance: MenuBarController?
 
     private let statusItem: NSStatusItem
@@ -12,11 +12,11 @@ final class MenuBarController {
     init(appState: AppState) {
         self.appState = appState
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
 
         setupMenuBarIcon()
         setupMenu()
-        
-        // Register after menu is set up
+
         Self.sharedInstance = self
     }
 
